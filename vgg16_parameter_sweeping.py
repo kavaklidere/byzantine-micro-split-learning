@@ -5,6 +5,51 @@ from torchvision import datasets
 import torchvision.models as models
 from torch.utils.data import DataLoader
 import copy
+import csv
+
+class MicroSplitLinear(nn.Module):
+    def __init__(self, original_layer, error_std_dev=0.05, num_clients_in_layer=1, malicious_client_index=0):
+        super().__init__()
+
+        self.num_clients_in_layer = num_clients_in_layer
+        
+        if malicious_client_index >= num_clients_in_layer or malicious_client_index < 0:
+            raise ValueError(f"malicious_client_index must be between 0 and {num_clients_in_layer - 1}")
+            
+        self.malicious_client_index = malicious_client_index
+        
+        self.client_clean = copy.deepcopy(original_layer)
+        self.client_noisy = copy.deepcopy(original_layer)
+        
+        with torch.no_grad():
+            noise = torch.randn_like(self.client_noisy.weight) * error_std_dev
+            self.client_noisy.weight.add_(noise)
+
+    def forward(self, x):
+        out_clean = self.client_clean(x)
+        out_noisy = self.client_noisy(x)
+        
+        if self.num_clients_in_layer == 1:
+            return out_noisy
+            
+        # 1. Target dimension 1 (The flat feature array)
+        total_features = out_clean.shape[1]
+        chunk_size = total_features // self.num_clients_in_layer
+        
+        start_idx = self.malicious_client_index * chunk_size
+        
+        if self.malicious_client_index == self.num_clients_in_layer - 1:
+            end_idx = total_features
+        else:
+            end_idx = start_idx + chunk_size
+        
+        # 2. Slice along dimension 1
+        left_clean = out_clean[:, :start_idx]
+        mid_noisy = out_noisy[:, start_idx:end_idx]
+        right_clean = out_clean[:, end_idx:]
+        
+        # 3. Concatenate back into a flat array
+        return torch.cat([left_clean, mid_noisy, right_clean], dim=1)
 
 class MicroSplitConv2d(nn.Module):
     def __init__(self, original_layer, error_std_dev=0.05, num_clients_in_layer=1, malicious_client_index=0):
@@ -70,99 +115,131 @@ def get_dataset():
         print(f"Error: Could not find '{data_dir}'.")
     return dataset
 
-def evaluate(device, dataloader, total_images, targeted_layer, std_dev, num_partition, num_iterations):
-
-    top1_acc_total = 0
-    top5_acc_total = 0
+def evaluate(device, dataloader, total_images, targeted_layer, layer_conv, std_dev, num_partition, num_iterations):
+    top1_acc_total = 0.0
+    top5_acc_total = 0.0
 
     for j in range(num_iterations):
-
         weights = models.VGG16_Weights.DEFAULT
         model = models.vgg16(weights=weights)
         
-        print("Swapping conv4-1 for the Micro-Split simulation layer...")
         client_index = 0
         if num_partition != 1:
             client_index = (num_partition // 2) * j
-        model.features[targeted_layer] = MicroSplitConv2d(model.features[targeted_layer], error_std_dev=std_dev, num_clients_in_layer=num_partition, malicious_client_index=client_index)
-        model = model.to(device)
         
+        if layer_conv == True:
+            model.features[targeted_layer] = MicroSplitConv2d(
+            model.features[targeted_layer], 
+            error_std_dev=std_dev, 
+            num_clients_in_layer=num_partition, 
+            malicious_client_index=client_index
+            )
+        else: 
+            model.classifier[targeted_layer] = MicroSplitLinear(
+            model.classifier[targeted_layer], 
+            error_std_dev=std_dev, 
+            num_clients_in_layer=num_partition, 
+            malicious_client_index=client_index
+            )
+
+        model = model.to(device)
         model.eval()
         
-        
-        top1_correct = 0
-        top5_correct = 0
-        
-        print("\n--- Starting Evaluation Loop ---")
+        top1_correct = 0.0
+        top5_correct = 0.0
         
         with torch.no_grad():
             for i, (images, labels) in enumerate(dataloader):
                 images = images.to(device)
                 labels = labels.to(device)
         
-                # Forward pass
                 outputs = model(images)
                 
-                # 5. Calculate Top-1 and Top-5 correctly
-                # topk returns the top 5 highest probability values and their indices
                 _, top5_preds = outputs.topk(5, 1, True, True)
-                
-                # Transpose predictions so each column is an image's top 5 predictions
                 top5_preds = top5_preds.t()
                 
-                # Check if the true labels match any of the top 5 predictions
                 correct_matches = top5_preds.eq(labels.view(1, -1).expand_as(top5_preds))
         
-                # Top-1 is just the first row of matches
                 top1_correct += correct_matches[:1].reshape(-1).float().sum(0, keepdim=True).item()
-                
-                # Top-5 sums up matches across all 5 rows
                 top5_correct += correct_matches[:5].reshape(-1).float().sum(0, keepdim=True).item()
-        
-                # Print progress every 50 batches
+
                 if (i + 1) % 50 == 0:
                     print(f"Processed batch {i + 1} / {len(dataloader)}...")
-        
-        # 6. Calculate final percentages
+
         top1_acc = top1_correct / total_images
         top5_acc = top5_correct / total_images
 
         top1_acc_total += top1_acc
         top5_acc_total += top5_acc
         
-        print(f"\n--- {j}th Iteration Results ---")
-        print(f"Top-1 Accuracy: {top1_acc:.2%}")
-        print(f"Top-5 Accuracy: {top5_acc:.2%}")
-        print(f"\n-------------------------------")
-
     top1_acc_total /= num_iterations
     top5_acc_total /= num_iterations
 
-    print(f"\n--- Final Results for std dev: {std_dev}, num partitions: {num_partition} ---")
-    print(f"Top-1 Accuracy: {top1_acc_total:.2%}")
-    print(f"Top-5 Accuracy: {top5_acc_total:.2%}")
-    print(f"\n-------------------------------")
-        
-def main():
+    # Return as percentages (e.g., 71.58) to match your plotting script expectations
+    return top1_acc_total * 100, top5_acc_total * 100
 
+
+def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Running full evaluation on: {device}")
+    
     dataset = get_dataset()
-
-    batch_size=64
+    batch_size = 64
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=2)
     total_images = len(dataset)
 
     print(f"Success! Found {len(dataset.classes)} classes and {total_images} total images.")
 
-    targeted_layer = 17 # conv4-1
+    targeted_layer = 0 # dense_1
+    experiment_name = "vgg16_dense_1"
     std_devs = [0.05, 0.1, 0.25, 0.5]
-    num_partitions = [1, 2, 4, 7]
+    num_partitions = [1, 2, 4, 8, 16]
     num_iterations = 2
 
-    for num_partition in num_partitions:
+    # Initialize data structures to hold our CSV rows
+    top1_data = {std: [] for std in std_devs}
+    top5_data = {std: [] for std in std_devs}
+
+    for std_dev in std_devs:
+        for num_partition in num_partitions:
+            print(f"\nEvaluating std_dev: {std_dev}, num_partition: {num_partition}")
+            t1, t5 = evaluate(
+                device=device, dataloader=dataloader, total_images=total_images, 
+                targeted_layer=targeted_layer, layer_conv=False,
+                std_dev=std_dev, num_partition=num_partition, num_iterations=num_iterations
+            )
+            
+            print(f"Result -> Top-1: {t1:.2f}%, Top-5: {t5:.2f}%")
+            top1_data[std_dev].append(t1)
+            top5_data[std_dev].append(t5)
+
+    # ==========================================
+    # Write directly to CSV
+    # ==========================================
+    os.makedirs("results", exist_ok=True)
+    top1_file = f"results/{experiment_name}_top_1.csv"
+    top5_file = f"results/{experiment_name}_top_5.csv"
+    
+    header = ["std_dev \\ num_partitions"] + num_partitions
+
+    # Write Top-1
+    with open(top1_file, mode='w', newline='') as f1:
+        writer = csv.writer(f1)
+        writer.writerow(header)
         for std_dev in std_devs:
-            evaluate(device=device, dataloader=dataloader, total_images=total_images, targeted_layer=targeted_layer, std_dev=std_dev, num_partition=num_partition, num_iterations=num_iterations)
+            # Rounding to 2 decimal places for a cleaner file
+            row = [std_dev] + [round(val, 2) for val in top1_data[std_dev]]
+            writer.writerow(row)
+
+    # Write Top-5
+    with open(top5_file, mode='w', newline='') as f5:
+        writer = csv.writer(f5)
+        writer.writerow(header)
+        for std_dev in std_devs:
+            row = [std_dev] + [round(val, 2) for val in top5_data[std_dev]]
+            writer.writerow(row)
+
+    print(f"\nAll results saved to {top1_file} and {top5_file}")
 
 if __name__ == "__main__":
     main()
