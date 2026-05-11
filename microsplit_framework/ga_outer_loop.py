@@ -34,6 +34,7 @@ class GAConfig:
     n_clusters: int = 100
     batch_size: int = 64
     n_per_class: int = 1
+    n_seed_from_prev: int = 0  # how many initial population slots come from seed_blueprints
 
 
 @dataclass
@@ -113,6 +114,7 @@ def run_ga(
     centroids: dict | None = None,
     mini_eval_loader: DataLoader | None = None,
     seed: int = 42,
+    seed_blueprints: list[RedundancyBlueprint] | None = None,
 ) -> GAResult:
     """
     Minimax GA: maximise worst-case Top-1 accuracy under m_attackers simultaneous
@@ -132,9 +134,11 @@ def run_ga(
         n_pre = config.n_preprocess_batches * config.batch_size
         import random as _random
         _random.Random(42).shuffle(pre_pool)
+        _g = torch.Generator()
+        _g.manual_seed(seed)
         pre_loader = DataLoader(
             Subset(dataset, pre_pool[:n_pre]),
-            batch_size=config.batch_size, shuffle=True, num_workers=2,
+            batch_size=config.batch_size, shuffle=True, num_workers=2, generator=_g,
         )
         mini_eval_loader = make_balanced_mini_loader(dataset, config.n_per_class, config.batch_size, seed=42)
         print(f"[GA] Mini-eval: {len(mini_eval_loader.dataset)} images ({len(eval_idx_set)} reserved, no overlap with preprocessing)")
@@ -184,7 +188,11 @@ def run_ga(
         return fitness_cache[bp]
 
     # --- Initial population ---
-    population = [_generate_blueprint(client_ids, config.budget) for _ in range(config.population_size)]
+    population: list[RedundancyBlueprint] = []
+    if seed_blueprints and config.n_seed_from_prev > 0:
+        n_from_prev = min(config.n_seed_from_prev, len(seed_blueprints), config.population_size)
+        population.extend(random.sample(seed_blueprints, n_from_prev))
+    population += [_generate_blueprint(client_ids, config.budget) for _ in range(config.population_size - len(population))]
     n_parents = max(2, int(config.population_size * config.elitism_ratio))
 
     best_blueprint: RedundancyBlueprint | None = None
