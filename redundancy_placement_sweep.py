@@ -105,6 +105,8 @@ def run_preprocessing(flat_model, base_client_specs, dataset, get_layer_fn, set_
 
 
 def main():
+    torch.manual_seed(42)
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Running on: {device}\n")
 

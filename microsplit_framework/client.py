@@ -84,7 +84,7 @@ class ClientModule(nn.Module):
         all_data = torch.cat(self.eavesdrop_memory, dim=0)
         flat     = all_data.view(all_data.size(0), -1).cpu().numpy()
 
-        kmeans = MiniBatchKMeans(n_clusters=n_clusters, batch_size=256, n_init="auto")
+        kmeans = MiniBatchKMeans(n_clusters=n_clusters, batch_size=256, n_init="auto", random_state=42)
         kmeans.fit(flat)
 
         original_shape = all_data.shape[1:]
