@@ -34,3 +34,18 @@ This framework was developed and tested using the following environment:
 * scikit-learn: 1.8.0
 * CUDA: 13.0, Driver 580.126.16
 * GPU: NVIDIA GeForce RTX 5060 Ti (16 GB VRAM)
+
+## Reproducing Experiments
+All scripts should be run from the root directory.
+
+### ClusterJump Attack (VGG16)
+To reproduce the ClusterJump attack on VGG16 on blocks conv2, conv4 and dense1, run:
+```bash
+python3 vgg16_cluster_jump_attack.py
+```
+
+### Genetic Algorithm for Redundancy Placement (VGG16)
+To reproduce the GA for Redundancy Placement on VGG16, run:
+```bash
+python3 redundancy_placement_sweep.py
+```
