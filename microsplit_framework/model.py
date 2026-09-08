@@ -76,15 +76,21 @@ class MicrosplitModel(nn.Module):
                 built_seq  = isolated.build_layers(clean_seq)
                 replica_modules.append(ReplicaModule(attack_config=isolated, layers=built_seq))
 
+            replica_device_ids = (
+                spec.replica_device_ids
+                if spec.replica_device_ids is not None
+                else [spec.client_id] * len(isolated_configs)
+            )
             client_map[spec.client_id] = ClientModule(
-                client_id      = spec.client_id,
-                layer_start    = spec.layer_range[0],
-                layer_end      = spec.layer_range[1],
-                h_start_frac   = spec.height_range[0],
-                h_end_frac     = spec.height_range[1],
-                replicas       = replica_modules,
-                attack_configs = isolated_configs,
-                aggregation    = spec.aggregation if spec.aggregation is not None else aggregation_factory(spec),
+                client_id          = spec.client_id,
+                layer_start        = spec.layer_range[0],
+                layer_end          = spec.layer_range[1],
+                h_start_frac       = spec.height_range[0],
+                h_end_frac         = spec.height_range[1],
+                replicas           = replica_modules,
+                attack_configs     = isolated_configs,
+                aggregation        = spec.aggregation if spec.aggregation is not None else aggregation_factory(spec),
+                replica_device_ids = replica_device_ids,
             )
 
         seg_router_list: list[SegmentRouter] = []

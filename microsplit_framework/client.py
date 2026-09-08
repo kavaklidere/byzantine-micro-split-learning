@@ -3,7 +3,7 @@ import torch
 import torch.nn as nn
 from sklearn.cluster import MiniBatchKMeans
 
-from microsplit_framework.attacks import AttackConfig, ClusterJumpAttack
+from microsplit_framework.attacks import AttackConfig, CleanAttack, ClusterJumpAttack
 from microsplit_framework.aggregation import AggregationStrategy
 from microsplit_framework.topology import resolve_height_pixels
 
@@ -58,6 +58,7 @@ class ClientModule(nn.Module):
         replicas: list[ReplicaModule],
         attack_configs: list[AttackConfig],
         aggregation: AggregationStrategy,
+        replica_device_ids: list[str] | None = None,
     ):
         super().__init__()
         self.client_id    = client_id
@@ -68,6 +69,11 @@ class ClientModule(nn.Module):
         self.replicas      = nn.ModuleList(replicas)
         self.attack_configs = attack_configs   # plain list — AttackConfig is not nn.Module
         self.aggregation   = aggregation
+        # device_id[i] = which physical device owns replica i
+        self.replica_device_ids: list[str] = (
+            replica_device_ids if replica_device_ids is not None
+            else [client_id] * len(attack_configs)
+        )
 
         # Cluster vocabulary — built by preprocess_clustering(), used by ClusterJumpAttack
         self.is_cluster_ready:   bool                   = False
@@ -115,10 +121,17 @@ class ClientModule(nn.Module):
 
         # Run all replicas first — pixel indices must be computed from the
         # OUTPUT shape, not the input shape, because pooling layers change height.
-        full_outputs: list[torch.Tensor] = [
-            replica.forward_segment(x, seg_start, seg_end, self.layer_start)
-            for replica in self.replicas
-        ]
+        shared_clean_output: torch.Tensor | None = None
+        full_outputs: list[torch.Tensor] = []
+        for replica, attack_config in zip(self.replicas, self.attack_configs):
+            if isinstance(attack_config, CleanAttack):
+                if shared_clean_output is None:
+                    shared_clean_output = replica.forward_segment(x, seg_start, seg_end, self.layer_start)
+                full_outputs.append(shared_clean_output)
+            else:
+                full_outputs.append(
+                    replica.forward_segment(x, seg_start, seg_end, self.layer_start)
+                )
 
         first_out  = full_outputs[0]
         is_spatial = (first_out.dim() == 4)
@@ -129,6 +142,9 @@ class ClientModule(nn.Module):
         )
 
         slices: list[torch.Tensor] = []
+        # Replicas from the same compromised device must output identical centroids
+        # to coordinate against median aggregation. We sample once per device and reuse.
+        device_to_indices: dict[str, torch.Tensor] = {}
 
         for idx, (full_output, attack_config) in enumerate(
             zip(full_outputs, self.attack_configs)
@@ -143,7 +159,13 @@ class ClientModule(nn.Module):
                 self.eavesdrop(clean_slice)
 
             if isinstance(attack_config, ClusterJumpAttack) and is_final and self.is_cluster_ready:
-                effective_slice = self.get_malicious_slice(clean_slice.size(0), full_output.device)
+                dev = self.replica_device_ids[idx]
+                if dev not in device_to_indices:
+                    n = self.cluster_centroids.size(0)
+                    device_to_indices[dev] = torch.randint(
+                        0, n, (clean_slice.size(0),), device=full_output.device
+                    )
+                effective_slice = self.cluster_centroids[device_to_indices[dev]]
             else:
                 effective_slice = clean_slice
 

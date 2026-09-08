@@ -14,6 +14,9 @@ class ClientSpec:
     height_range: tuple[float, float]
     replicas: list["AttackConfig"]
     aggregation: "AggregationStrategy | None" = None
+    # One device_id per replica — which physical device owns that replica.
+    # None means all replicas belong to a single implicit device (client_id).
+    replica_device_ids: "list[str] | None" = None
 
     def __post_init__(self):
         l0, l1 = self.layer_range
@@ -24,6 +27,13 @@ class ClientSpec:
             raise ValueError(f"Client '{self.client_id}': height_range {self.height_range} must satisfy 0.0 <= start < end <= 1.0.")
         if len(self.replicas) < 1:
             raise ValueError(f"Client '{self.client_id}' must have at least one replica.")
+
+
+@dataclass
+class DeviceSpec:
+    """Baseline topology entry: which partitions a device owns."""
+    device_id: str
+    client_specs: "list[ClientSpec]"
 
 
 @dataclass
